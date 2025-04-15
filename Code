@@ -1,0 +1,212 @@
+%%writefile expensive_operations.c
+#include <stdio.h>
+#include <math.h>
+#include <omp.h>
+
+#define N 10000000  // Vector size
+
+int main() {
+    float A[N], B[N], C[N];
+    double start, end;
+
+    // Initialize vectors
+    #pragma omp parallel for
+    for (int i = 0; i < N; i++) {
+        A[i] = i * 1.0f;
+        B[i] = (N - i) * 1.0f;
+    }
+
+    // Vector Addition
+    start = omp_get_wtime();
+    #pragma omp parallel for
+    for (int i = 0; i < N; i++) {
+        C[i] = A[i] + B[i];
+    }
+    end = omp_get_wtime();
+    printf("Vector Addition Time: %f seconds\n", end - start);
+
+    // Vector Multiplication
+    start = omp_get_wtime();
+    #pragma omp parallel for
+    for (int i = 0; i < N; i++) {
+        C[i] = A[i] * B[i];
+    }
+    end = omp_get_wtime();
+    printf("Vector Multiplication Time: %f seconds\n", end - start);
+
+    // Square Root Operation
+    start = omp_get_wtime();
+    #pragma omp parallel for
+    for (int i = 0; i < N; i++) {
+        C[i] = sqrt(A[i]);
+    }
+    end = omp_get_wtime();
+    printf("Vector Square Root Time: %f seconds\n", end - start);
+
+    return 0;
+}
+
+OUTPUT
+Writing expensive_operations.c
+
+
+!gcc -fopenmp expensive_operations.c -o expensive_ops -lm
+!./expensive_ops
+
+%%writefile sqrt_cuda.cu
+#include <stdio.h>
+#include <math.h>
+
+__global__ void sqrtKernel(float* A, float* C, int N) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) {
+        C[i] = sqrtf(A[i]);
+    }
+}
+
+int main() {
+    const int N = 1 << 20; // 1 million elements
+    size_t size = N * sizeof(float);
+
+    float *h_A = (float*)malloc(size);
+    float *h_C = (float*)malloc(size);
+
+    for (int i = 0; i < N; ++i)
+        h_A[i] = i * 1.0f;
+
+    float *d_A, *d_C;
+    cudaMalloc(&d_A, size);
+    cudaMalloc(&d_C, size);
+
+    cudaMemcpy(d_A, h_A, size, cudaMemcpyHostToDevice);
+
+    int threadsPerBlock = 256;
+    int blocksPerGrid = (N + threadsPerBlock - 1) / threadsPerBlock;
+    sqrtKernel<<<blocksPerGrid, threadsPerBlock>>>(d_A, d_C, N);
+
+    cudaMemcpy(h_C, d_C, size, cudaMemcpyDeviceToHost);
+
+    // Print first 10 results
+    for (int i = 0; i < 10; ++i) {
+        printf("sqrt(%f) = %f\n", h_A[i], h_C[i]);
+    }
+
+    cudaFree(d_A);
+    cudaFree(d_C);
+    free(h_A);
+    free(h_C);
+
+    return 0;
+}
+
+
+OUTPUT
+Writing sqrt_cuda.cu
+
+
+!nvcc sqrt_cuda.cu -o sqrt_cuda
+!./sqrt_cuda
+
+OUTPUT
+sqrt(0.000000) = 0.000000
+sqrt(1.000000) = 0.000000
+sqrt(2.000000) = 0.000000
+sqrt(3.000000) = 0.000000
+sqrt(4.000000) = 0.000000
+sqrt(5.000000) = 0.000000
+sqrt(6.000000) = 0.000000
+sqrt(7.000000) = 0.000000
+sqrt(8.000000) = 0.000000
+sqrt(9.000000) = 0.000000
+
+
+%%writefile sqrt_cuda_timings.cu
+#include <stdio.h>
+#include <math.h>
+#include <cuda.h>
+
+__global__ void sqrtKernel(float* A, float* C, int N) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) {
+        C[i] = sqrtf(A[i]);
+    }
+}
+
+extern "C"
+float runSqrtKernel(int N) {
+    float *h_A, *h_C, *d_A, *d_C;
+    size_t size = N * sizeof(float);
+
+    h_A = (float*)malloc(size);
+    h_C = (float*)malloc(size);
+    for (int i = 0; i < N; ++i) h_A[i] = i * 1.0f;
+
+    cudaMalloc(&d_A, size);
+    cudaMalloc(&d_C, size);
+    cudaMemcpy(d_A, h_A, size, cudaMemcpyHostToDevice);
+
+    int threadsPerBlock = 256;
+    int blocksPerGrid = (N + threadsPerBlock - 1) / threadsPerBlock;
+
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+
+    cudaEventRecord(start);
+    sqrtKernel<<<blocksPerGrid, threadsPerBlock>>>(d_A, d_C, N);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+
+    cudaMemcpy(h_C, d_C, size, cudaMemcpyDeviceToHost);
+
+    cudaFree(d_A);
+    cudaFree(d_C);
+    free(h_A);
+    free(h_C);
+
+    return milliseconds;
+}
+
+OUTPUT
+Writing sqrt_cuda_timings.cu
+
+
+!nvcc -Xcompiler -fPIC -shared -o libsqrt.so sqrt_cuda_timings.cu
+
+
+import ctypes
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Load the compiled shared object
+lib = ctypes.CDLL('./libsqrt.so')
+lib.runSqrtKernel.argtypes = [ctypes.c_int]
+lib.runSqrtKernel.restype = ctypes.c_float
+
+sizes = [50000, 500000, 5000000, 50000000]
+times = []
+
+for size in sizes:
+    time_ms = lib.runSqrtKernel(size)
+    print(f"Array size: {size} -> Time: {time_ms:.4f} ms")
+    times.append(time_ms)
+
+
+OUTPUT
+Array size: 50000 -> Time: 19.1228 ms
+Array size: 500000 -> Time: 0.0029 ms
+Array size: 5000000 -> Time: 0.0029 ms
+Array size: 50000000 -> Time: 0.0029 ms
+
+
+plt.figure(figsize=(10, 6))
+plt.plot(sizes, times, marker='o', linestyle='-', color='royalblue')
+plt.title('CUDA Square Root Computation Time vs Array Size')
+plt.xlabel('Array Size')
+plt.ylabel('Time (ms)')
+plt.grid(True)
+plt.xticks(sizes, [f"{s//1000}K" if s<1e6 else f"{s//1_000_000}M" for s in sizes])
+plt.show()
